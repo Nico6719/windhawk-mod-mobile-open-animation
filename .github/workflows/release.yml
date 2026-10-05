@@ -29,8 +29,14 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          gh release create "${GITHUB_REF_NAME}" \
-            --title "Mobile Open Animation ${GITHUB_REF_NAME}" \
-            --generate-notes \
+          # The template in .github/release-notes.md is used as the body; the API appends
+          # the generated notes to it, so the release lists both how to install and what
+          # changed since the previous tag.
+          gh api -X POST "repos/${GITHUB_REPOSITORY}/releases" \
+            -f tag_name="${GITHUB_REF_NAME}" \
+            -f name="Mobile Open Animation ${GITHUB_REF_NAME}" \
+            -f body="$(cat .github/release-notes.md)" \
+            -F generate_release_notes=true
+          gh release upload "${GITHUB_REF_NAME}" \
             mobile-open-animation.wh.cpp \
             "mobile-open-animation-${GITHUB_REF_NAME}.zip"
