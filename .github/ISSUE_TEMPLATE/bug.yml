@@ -1,0 +1,39 @@
+name: Bug report
+description: Something does not animate, or animates wrongly
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Before filling this in, please turn on logging for the mod in Windhawk, reproduce
+        the problem once, and copy the lines that start with `[local@mobile-open-animation]`.
+        They name the window, its class and the exact rule that skipped it.
+  - type: input
+    id: app
+    attributes:
+      label: Which program
+      description: The program that did not animate (and whether its window was normal, maximized or fullscreen)
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you expected and what you got instead
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log lines
+      description: The `[local@mobile-open-animation]` lines from Windhawk's log
+      render: text
+    validations:
+      required: false
+  - type: input
+    id: env
+    attributes:
+      label: Windows and Windhawk version
+      description: e.g. Windows 11 build 26100, Windhawk 1.7.3
+    validations:
+      required: true
