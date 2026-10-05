@@ -1,0 +1,36 @@
+name: Release
+
+# Pushing a tag like v1.0.0 publishes a release with the mod source and a zip that contains
+# everything a user needs (source, Chinese install guide, demo GIF).
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the package
+        run: |
+          set -e
+          mkdir -p dist
+          cp mobile-open-animation.wh.cpp dist/
+          cp 安装说明.md dist/
+          mkdir -p dist/assets && cp assets/demo.gif dist/assets/
+          (cd dist && zip -r "../mobile-open-animation-${GITHUB_REF_NAME}.zip" .)
+
+      - name: Create the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "${GITHUB_REF_NAME}" \
+            --title "Mobile Open Animation ${GITHUB_REF_NAME}" \
+            --generate-notes \
+            mobile-open-animation.wh.cpp \
+            "mobile-open-animation-${GITHUB_REF_NAME}.zip"
