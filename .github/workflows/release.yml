@@ -46,7 +46,7 @@ jobs:
           # since the previous tag. How to install belongs in the assets, not in the notes.
           gh api -X POST "repos/${GITHUB_REPOSITORY}/releases" \
             -f tag_name="${GITHUB_REF_NAME}" \
-            -f name="Mobile Open Animation ${GITHUB_REF_NAME}" \
+            -f name="${GITHUB_REF_NAME}" \
             -F generate_release_notes=true \
             -F prerelease=${{ steps.channel.outputs.prerelease }}
           gh release upload "${GITHUB_REF_NAME}" \
