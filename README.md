@@ -1,7 +1,9 @@
-> **Not in Windhawk's catalogue yet.** The mod is under review
-> ([ramensoftware/windhawk-mods#5899](https://github.com/ramensoftware/windhawk-mods/pull/5899)).
-> Until it is accepted, install it from source - see [安装说明.md](安装说明.md).
-> The GIF below is a real recording; the source in this repository is what the pull request contains.
+> **In Windhawk's catalogue.** Search for **Mobile Open Animation** in Windhawk's mod
+> list and install it from there.
+>
+> This repository is where the mod is developed, so its source can be ahead of what the
+> catalogue has. To try the latest, install from source - see [安装说明.md](安装说明.md).
+> The GIF below is a real recording.
 
 # Mobile Open Animation
 

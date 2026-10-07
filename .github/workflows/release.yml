@@ -2,6 +2,8 @@ name: Release
 
 # Pushing a tag like v1.0.0 publishes a release with the mod source and a zip that contains
 # everything a user needs (source, Chinese install guide, demo GIF).
+# A tag that names a pre-release (v1.1.0_Pre1, v1.2.0-pre2) goes out marked as one, so it
+# never becomes the release people are pointed at by default.
 on:
   push:
     tags:
@@ -15,6 +17,17 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+
+      - name: Detect a pre-release tag
+        id: channel
+        run: |
+          # "pre" anywhere in the tag, in either the _Pre1 or -pre2 spelling. A plain
+          # version never contains it.
+          if [[ "${GITHUB_REF_NAME}" =~ [Pp][Rr][Ee] ]]; then
+            echo "prerelease=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "prerelease=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Build the package
         run: |
@@ -36,7 +49,8 @@ jobs:
             -f tag_name="${GITHUB_REF_NAME}" \
             -f name="Mobile Open Animation ${GITHUB_REF_NAME}" \
             -f body="$(cat .github/release-notes.md)" \
-            -F generate_release_notes=true
+            -F generate_release_notes=true \
+            -F prerelease=${{ steps.channel.outputs.prerelease }}
           gh release upload "${GITHUB_REF_NAME}" \
             mobile-open-animation.wh.cpp \
             "mobile-open-animation-${GITHUB_REF_NAME}.zip"

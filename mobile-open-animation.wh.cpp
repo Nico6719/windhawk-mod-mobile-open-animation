@@ -4,7 +4,7 @@
 // @name:zh-CN      移动端风格的窗口打开动画
 // @description     App windows zoom open from the icon (cursor position) with a fade, phone-style, using a splash panel with the app icon.
 // @description:zh-CN 让应用窗口像手机桌面那样从你点击的图标处放大铺开并淡入：用一块带应用图标的占位面板做展开动画，等真窗口画好再交接。
-// @version         1.0.0
+// @version         1.1.0_Pre1
 // @author          Nico6719
 // @github          https://github.com/Nico6719
 // @include         *
