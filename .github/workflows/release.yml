@@ -42,13 +42,11 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          # The template in .github/release-notes.md is used as the body; the API appends
-          # the generated notes to it, so the release lists both how to install and what
-          # changed since the previous tag.
+          # No body is sent on purpose: generate_release_notes fills it with what changed
+          # since the previous tag. How to install belongs in the assets, not in the notes.
           gh api -X POST "repos/${GITHUB_REPOSITORY}/releases" \
             -f tag_name="${GITHUB_REF_NAME}" \
             -f name="Mobile Open Animation ${GITHUB_REF_NAME}" \
-            -f body="$(cat .github/release-notes.md)" \
             -F generate_release_notes=true \
             -F prerelease=${{ steps.channel.outputs.prerelease }}
           gh release upload "${GITHUB_REF_NAME}" \
