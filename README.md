@@ -12,7 +12,9 @@ clicked, and fades in, instead of appearing all at once. The app icon keeps its 
 the whole time; only the frame grows.
 
 Works from desktop icons, the taskbar, the Start menu and search, and from
-double-clicking a file that starts a program.
+double-clicking a file that starts a program. It also covers the case where the icon you
+click belongs to an app that is already running and the click is what brings its hidden
+window back up.
 
 ## Settings
 
@@ -47,8 +49,10 @@ Everything else has a description in the settings panel.
 - **Online games with anti-cheat, and security suites** - they refuse to be injected, so
   the mod cannot get in.
 - **Dialogs** - off by default. There is a setting to enable them.
-- **Windows of another process** - a launch only ever animates the windows of the
-  process it started.
+- **A window another program shows** - clicking an icon that wakes up an app which is
+  already running does animate: the show is handed to that app, which animates its own
+  window. The one case still left alone is a program that shows the window while also
+  setting its position or placement in the same call.
 - **System UI hosts** - the shell experience hosts, the Start menu, search, the lock
   screen and a few more are excluded from the mod entirely, so it is not even loaded
   into them.
@@ -87,7 +91,8 @@ Windhawk's process exclusion list.
 让 Windows 应用像手机那样「打开」：窗口从你点击的图标处放大铺开并淡入，而不是整块弹出来。
 图标在整段动画里保持原大小，只有外框在长大。
 
-桌面图标、任务栏、开始菜单和搜索、双击文件启动程序都支持。
+桌面图标、任务栏、开始菜单和搜索、双击文件启动程序都支持。点一个已经在运行的应用的图标、
+由这次点击把它隐藏的窗口调出来时，也有动画。
 
 ### 设置
 
@@ -114,7 +119,8 @@ Windhawk's process exclusion list.
   （记事本已是商店版），**不要用记事本测试**。
 - **带反作弊的在线游戏、杀毒软件** —— 这些程序拒绝被注入，mod 无从下手。
 - **对话框** —— 默认不做动画，可以在设置里打开。
-- **别的进程的窗口** —— 一次启动只给这次启动出来的那个进程的窗口做动画。
+- **别的进程的窗口** —— 点图标唤醒一个已经在运行的实例时，这次「显示」会交给那个进程，由它给
+  自己的窗口做动画，所以照样有动画。只有「连窗口位置或大小一起设置」的那种显示方式仍然不做。
 - **系统界面宿主** —— 壳体验宿主、开始菜单、搜索、锁屏等进程被整体排除，mod 根本不会被加载进去。
 - 尺寸异常小的窗口。
 

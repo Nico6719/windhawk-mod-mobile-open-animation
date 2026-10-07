@@ -975,8 +975,18 @@ static bool ShouldAnimate(HWND hwnd, const AnimParams& p, const wchar_t* cls,
     const bool fullscreen = CoversMonitor(rc);
 
     if (!(style & WS_CAPTION) && !fullscreen) {
-        *reason = "no WS_CAPTION";
-        return false;
+        // A frameless main window is not a popup. Qt/Electron/WPF apps draw their own
+        // title bar, so their main window carries no WS_CAPTION and is created as
+        // WS_POPUP (DingTalk's Qt51511QWindowIcon, the window this gate used to eat, is
+        // exactly that), but it keeps the frame bits that a menu, tooltip or dropdown
+        // never has.
+        // Measured on this machine: of 282 top-level windows, admitting the frame bits
+        // below adds 3 windows, all of them real application windows.
+        const LONG kMainFrameBits = WS_THICKFRAME | WS_SYSMENU | WS_MINIMIZEBOX | WS_MAXIMIZEBOX;
+        if (!(style & kMainFrameBits)) {
+            *reason = "no WS_CAPTION (and no frame bits: popup/menu)";
+            return false;
+        }
     }
     // Maximized windows are only skipped on the fallback path that animates the real
     // window, because that path animates by changing the real window's rectangle and
@@ -3186,19 +3196,102 @@ static bool IsShowCommand(int nCmdShow) {
     }
 }
 
+// Forwarding a show to the process that owns the window
+//
+// The show hooks fire in the caller's process and the window can belong to another one: a
+// single-instance app's second launch finds the first instance's hidden main window, calls
+// ShowWindow/ShowWindowAsync on it and exits. The caller cannot animate it - DWM cloaking
+// of another process's window is refused with ACCESS_DENIED, so it cannot even hide it, and
+// restoring it would depend on a process that is about to disappear. So the caller only
+// asks the owning process to run the animation on its own window, and the hide, the
+// animation and the restore stay in the process whose lifetime the window belongs to.
+//
+// Every instance of the mod creates one message-only window for this (see IpcStart). It is
+// looked up by PID: the caller enumerates the message-only windows of this class and picks
+// the one whose process owns the target window.
+static const wchar_t* const kIpcClass = L"WhMobileOpenAnimationIpc";
+static const wchar_t* const kIpcMsgName = L"WhMobileOpenAnimationShow";
+
+// Written once by Wh_ModInit and read from hook threads and from the IPC thread.
+static std::atomic<UINT> g_ipcMsg{0};
+static std::atomic<bool> g_ipcClassRegistered{false};
+static HANDLE g_ipcThread = nullptr;
+static DWORD g_ipcThreadId = 0;
+
+// The receiver only starts the deferred path, so it answers in microseconds. The bound is
+// there for a system under load, and SMTO_ABORTIFHUNG covers the other case: a receiver
+// that is hung answers at once and the caller falls back to its own original call.
+static const UINT kIpcTimeoutMs = 200;
+
+static bool IsOwnWindow(HWND hwnd) {
+    DWORD pid = 0;
+    GetWindowThreadProcessId(hwnd, &pid);
+    return pid == GetCurrentProcessId();
+}
+
+// Returns true when the request was handed to the owning process and *result holds what
+// the original call would have returned. False means "do it here".
+//
+// Only ShowWindow and ShowWindowAsync can be forwarded: they are the two calls whose whole
+// argument list is "window + show command". SetWindowPos and SetWindowPlacement also carry
+// geometry and placement that a forwarded ShowWindow would silently drop, so those keep
+// the old behaviour and are simply not animated across processes.
+//
+// ShowWindowAsync is posted. A call whose whole point is that the caller never waits must
+// not start waiting here. ShowWindow sends and waits, which is what it was going to do
+// anyway: the original call is a synchronous send into the same window thread.
+static bool ForwardShow(HWND hwnd, int nCmdShow, bool async, BOOL* result) {
+    // Read before the request goes out. This is what the original call returns ("was the
+    // window visible beforehand"), and by the time the synchronous path comes back the
+    // owning process may already have shown it.
+    const BOOL wasVisible = IsWindowVisible(hwnd);
+
+    const UINT msg = g_ipcMsg.load(std::memory_order_relaxed);
+    if (!msg) return false;
+    DWORD ownerPid = 0;
+    GetWindowThreadProcessId(hwnd, &ownerPid);
+    if (!ownerPid) return false;
+
+    HWND ipc = nullptr;
+    HWND cur = nullptr;
+    for (int i = 0; i < 4096; i++) {
+        cur = FindWindowExW(HWND_MESSAGE, cur, kIpcClass, nullptr);
+        if (!cur) break;
+        DWORD pid = 0;
+        GetWindowThreadProcessId(cur, &pid);
+        if (pid == ownerPid) {
+            ipc = cur;
+            break;
+        }
+    }
+    if (!ipc) return false;
+
+    if (async) {
+        if (!PostMessageW(ipc, msg, (WPARAM)hwnd, (LPARAM)nCmdShow)) return false;
+    } else {
+        DWORD_PTR accepted = 0;
+        if (!SendMessageTimeoutW(ipc, msg, (WPARAM)hwnd, (LPARAM)nCmdShow,
+                                 SMTO_ABORTIFHUNG | SMTO_BLOCK, kIpcTimeoutMs, &accepted) ||
+            !accepted) {
+            return false;
+        }
+    }
+    // Both calls return whether the window was previously visible, which is what it was
+    // just before the request was sent.
+    *result = wasVisible;
+    return true;
+}
+
 static bool ShouldAnimateShow(HWND hwnd, const AnimParams& p, wchar_t* clsOut,
                               size_t clsCount, const char** reason,
                               bool expectHidden = true) {
     clsOut[0] = L'\0';
     *reason = nullptr;
-    // The show hooks fire in the caller's process and the window they are handed can
-    // belong to another one: a single-instance app's second launch finds the first
-    // instance's hidden main window, calls ShowWindow/ShowWindowAsync on it and exits.
-    // Taking that window over hides it in a process that is about to disappear, which
-    // leaves it invisible for good. Only windows of this process are ours to animate.
-    DWORD ownerPid = 0;
-    GetWindowThreadProcessId(hwnd, &ownerPid);
-    if (ownerPid != GetCurrentProcessId()) {
+    // A window of another process is never animated here: taking it over would hide it in
+    // a process that is about to disappear, which leaves it invisible for good. The show
+    // hooks hand such a show to the owning process instead (see ForwardShow); this is the
+    // guard for every path that does not go through it.
+    if (!IsOwnWindow(hwnd)) {
         *reason = "window of another process";
         return false;
     }
@@ -3337,6 +3430,15 @@ BOOL WINAPI HookedShowWindow(HWND hwnd, int nCmdShow) {
     if (g_inHook) return pOrigShowWindow(hwnd, nCmdShow);
     if (!IsShowCommand(nCmdShow)) return pOrigShowWindow(hwnd, nCmdShow);
 
+    // A window of another process is shown by the process that owns it (see ForwardShow).
+    // When that is not possible, ShouldAnimateShow turns it down below and the original
+    // call runs at the bottom of this function.
+    BOOL forwarded = FALSE;
+    if (!IsOwnWindow(hwnd) && ForwardShow(hwnd, nCmdShow, /*async=*/false, &forwarded)) {
+        DiagSkip("ShowWindow", hwnd, "forwarded to the owning process");
+        return forwarded;
+    }
+
     // This hook must never swallow the call: if the judgement gives up, the window
     // still has to be shown. An app that never sees ShowWindow return is left with a
     // window that never appears, which is far worse than no animation. Every early
@@ -3380,9 +3482,67 @@ static DWORD WINAPI DeferredAnimationThread(LPVOID param) {
     return 0;
 }
 
+// The original ShowWindowAsync is best-effort: Wh_ModInit only logs a failure to hook it,
+// so the pointer can be missing while the forwarding receiver below is still live.
+static BOOL RealShowWindowAsync(HWND hwnd, int nCmdShow) {
+    if (pOrigShowWindowAsync) return pOrigShowWindowAsync(hwnd, nCmdShow);
+    return pOrigShowWindow(hwnd, nCmdShow);
+}
+
+// Hide the window, post the show, then pick it up on a separate thread once it is visible.
+// Shared by the ShowWindowAsync hook and by a show forwarded from another process, so both
+// take exactly the same path.
+//
+// Nothing here waits for the window's thread. That is the point of ShowWindowAsync, and it
+// matters just as much for the forwarded case: the handler that calls this is joined during
+// unload, and it must not be inside a blocking call when that happens.
+//
+// Returns what ShowWindowAsync returns - whether the window was visible beforehand.
+static BOOL AsyncAnimateShow(HWND hwnd, int nCmdShow, const AnimParams& p) {
+    if (TooSoon(hwnd)) {
+        DiagSkip("repeat show", hwnd, "animated a moment ago");
+        return RealShowWindowAsync(hwnd, nCmdShow);
+    }
+    const int index = AllocSlot(hwnd);
+    if (index < 0) return RealShowWindowAsync(hwnd, nCmdShow);
+
+    // Read before hiding: neither the cloak nor the alpha changes WS_VISIBLE, so this is
+    // the value the original call would have returned.
+    const BOOL wasVisible = IsWindowVisible(hwnd);
+
+    AnimSlot* slot = &g_slots[index];
+    slot->params = p;
+    slot->showTick = GetTickCount64();
+    slot->painted.store(false, std::memory_order_relaxed);
+    HideForAnimation(hwnd, slot, p.splash);
+
+    g_inHook = true;
+    RealShowWindowAsync(hwnd, nCmdShow);
+    g_inHook = false;
+
+    HANDLE thread = CreateThread(nullptr, 0, DeferredAnimationThread,
+                                 (LPVOID)(INT_PTR)index, 0, nullptr);
+    if (thread) {
+        RegisterModThread(thread);
+    } else {
+        RestoreWindowStyle(slot, hwnd);
+        ReleaseSlot(slot);
+    }
+    return wasVisible;
+}
+
 BOOL WINAPI HookedShowWindowAsync(HWND hwnd, int nCmdShow) {
     if (g_inHook) return pOrigShowWindowAsync(hwnd, nCmdShow);
     if (!IsShowCommand(nCmdShow)) return pOrigShowWindowAsync(hwnd, nCmdShow);
+
+    // A window of another process is shown by the process that owns it (see ForwardShow).
+    // When that is not possible, ShouldAnimateShow turns it down below and the original
+    // call runs there.
+    BOOL forwarded = FALSE;
+    if (!IsOwnWindow(hwnd) && ForwardShow(hwnd, nCmdShow, /*async=*/true, &forwarded)) {
+        DiagSkip("ShowWindowAsync", hwnd, "forwarded to the owning process");
+        return forwarded;
+    }
 
     const AnimParams p = GetParams();
     wchar_t cls[256];
@@ -3404,30 +3564,7 @@ BOOL WINAPI HookedShowWindowAsync(HWND hwnd, int nCmdShow) {
         return pOrigShowWindowAsync(hwnd, nCmdShow);
     }
 
-    if (TooSoon(hwnd)) return pOrigShowWindowAsync(hwnd, nCmdShow);
-
-    const int index = AllocSlot(hwnd);
-    if (index < 0) return pOrigShowWindowAsync(hwnd, nCmdShow);
-
-    AnimSlot* slot = &g_slots[index];
-    slot->params = p;
-    slot->showTick = GetTickCount64();
-    slot->painted.store(false, std::memory_order_relaxed);
-    HideForAnimation(hwnd, slot, p.splash);
-
-    g_inHook = true;
-    BOOL result = pOrigShowWindowAsync(hwnd, nCmdShow);
-    g_inHook = false;
-
-    HANDLE thread = CreateThread(nullptr, 0, DeferredAnimationThread,
-                                 (LPVOID)(INT_PTR)index, 0, nullptr);
-    if (thread) {
-        RegisterModThread(thread);
-    } else {
-        RestoreWindowStyle(slot, hwnd);
-        ReleaseSlot(slot);
-    }
-    return result;
+    return AsyncAnimateShow(hwnd, nCmdShow, p);
 }
 
 // Hook: SetWindowPlacement
@@ -3560,6 +3697,104 @@ BOOL WINAPI HookedSetWindowPos(HWND hwnd, HWND after, int x, int y, int cx, int 
     return result;
 }
 
+// Cross-process forwarding: the receiving side
+//
+// One message-only window per process. Message-only windows are the right carrier: they are
+// never visible, never show up in Alt+Tab or in EnumWindows, and cost nothing while idle
+// because the thread sits in GetMessage.
+//
+// The window needs a thread of its own because the engine thread that calls Wh_ModInit has
+// no message loop, so a window created there would never receive anything.
+
+static LRESULT CALLBACK IpcWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    const UINT ipcMsg = g_ipcMsg.load(std::memory_order_relaxed);
+    if (!ipcMsg || msg != ipcMsg) return DefWindowProcW(hwnd, msg, wParam, lParam);
+
+    // Refusing means "not handled", and the caller then runs its own original call.
+    if (g_unloading.load(std::memory_order_relaxed)) return 0;
+
+    const int nCmdShow = (int)lParam;
+    // Any process can post to this window, so the command is validated here instead of
+    // being trusted from the caller.
+    if (!IsShowCommand(nCmdShow)) return 0;
+
+    // The request comes from another process. Every judgement runs here, in the process
+    // that owns the window, which is the whole point: the hide, the animation and the
+    // restore all stay with the window's own process lifetime.
+    const HWND target = (HWND)wParam;
+    const AnimParams p = GetParams();
+    wchar_t cls[256];
+    const char* reason = nullptr;
+    if (!ShouldAnimateShow(target, p, cls, 256, &reason)) {
+        DiagSkip("forwarded show", target, reason);
+        // Declining to animate must not decline to show: the caller does not run the
+        // original call itself once the request has been accepted.
+        RealShowWindowAsync(target, nCmdShow);
+        return 1;
+    }
+    AsyncAnimateShow(target, nCmdShow, p);
+    return 1;
+}
+
+static DWORD WINAPI IpcThreadProc(LPVOID) {
+    // Registered under the mod's own module handle, like the splash class. A class left
+    // behind by a previous instance must never be picked up: its procedure would point
+    // into an image that is no longer there.
+    WNDCLASSEXW wc = {sizeof(WNDCLASSEXW)};
+    wc.lpfnWndProc = IpcWndProc;
+    wc.hInstance = g_modInstance;
+    wc.lpszClassName = kIpcClass;
+    if (!RegisterClassExW(&wc)) {
+        Wh_Log(L"forwarding: IPC window class registration failed");
+        return 0;
+    }
+    g_ipcClassRegistered.store(true, std::memory_order_release);
+
+    HWND w = CreateWindowExW(0, kIpcClass, L"", 0, 0, 0, 0, 0, HWND_MESSAGE, nullptr,
+                             g_modInstance, nullptr);
+    if (!w) {
+        Wh_Log(L"forwarding: IPC window creation failed");
+        return 0;
+    }
+
+    MSG msg;
+    while (GetMessageW(&msg, nullptr, 0, 0) > 0) {
+        TranslateMessage(&msg);
+        DispatchMessageW(&msg);
+    }
+    // The window procedure is in this DLL, so the window has to go before the DLL does.
+    DestroyWindow(w);
+    return 0;
+}
+
+// Failing to set this up only costs the ability to receive shows forwarded from another
+// process; this process still animates its own windows normally.
+static void IpcStart() {
+    // g_modInstance is resolved by RegisterSplashClass, which Wh_ModInit calls just before.
+    if (!g_modInstance) return;
+    g_ipcMsg = RegisterWindowMessageW(kIpcMsgName);
+    if (!g_ipcMsg) return;
+    g_ipcThread = CreateThread(nullptr, 0, IpcThreadProc, nullptr, 0, &g_ipcThreadId);
+}
+
+static void IpcStop() {
+    if (!g_ipcThread) return;
+    // PostThreadMessageW fails with ERROR_INVALID_THREAD_ID until the thread has a message
+    // queue, and that only exists once it has created its window. Retrying is cheaper than
+    // tracking that separately, and the thread is up within microseconds.
+    for (int i = 0; i < 400; i++) {
+        if (WaitForSingleObject(g_ipcThread, 0) == WAIT_OBJECT_0) break;
+        if (PostThreadMessageW(g_ipcThreadId, WM_QUIT, 0, 0)) break;
+        Sleep(1);
+    }
+    // The thread finishes the message it is on and only then exits, so this also covers a
+    // forwarded show that is being started right now.
+    WaitForSingleObject(g_ipcThread, INFINITE);
+    CloseHandle(g_ipcThread);
+    g_ipcThread = nullptr;
+    g_ipcThreadId = 0;
+}
+
 // Lifecycle
 
 static void CacheSelfPaths() {
@@ -3661,6 +3896,11 @@ BOOL Wh_ModInit() {
     if (!RegisterSplashClass()) {
         Wh_Log(L"splash window class registration failed, using the real-window path");
     }
+
+    // Last for the same reason as the splash class above, and after it because it needs the
+    // module handle it resolves. Failing is not fatal: this process just cannot receive a
+    // show forwarded from another process.
+    IpcStart();
     return TRUE;
 }
 
@@ -3678,6 +3918,11 @@ void Wh_ModBeforeUninit() {
 }
 
 void Wh_ModUninit() {
+    // Stop the forwarding receiver first: after this no request from another process can be
+    // taken on, and the thread it might have spawned is registered before JoinModThreads
+    // runs, so it is joined below like any other.
+    IpcStop();
+
     // Windhawk unmaps this DLL as soon as this returns, so no thread of ours may still be
     // running. It also means the hooks are gone and no new one can start.
     JoinModThreads();
@@ -3704,5 +3949,10 @@ void Wh_ModUninit() {
     if (g_splashClassRegistered) {
         UnregisterClassW(kSplashClass, g_modInstance);
         g_splashClassRegistered = false;
+    }
+    // The IPC thread registered this one and has been joined above, so its value is final.
+    if (g_ipcClassRegistered.load(std::memory_order_acquire)) {
+        UnregisterClassW(kIpcClass, g_modInstance);
+        g_ipcClassRegistered.store(false, std::memory_order_release);
     }
 }
