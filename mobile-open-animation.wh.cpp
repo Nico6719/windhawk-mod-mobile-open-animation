@@ -4,7 +4,7 @@
 // @name:zh-CN      移动端风格的窗口打开动画
 // @description     App windows zoom open from the icon (cursor position) with a fade, phone-style, using a splash panel with the app icon.
 // @description:zh-CN 让应用窗口像手机桌面那样从你点击的图标处放大铺开并淡入：用一块带应用图标的占位面板做展开动画，等真窗口画好再交接。
-// @version         1.1.0_Pre1
+// @version         1.1.0_Pre2
 // @author          Nico6719
 // @github          https://github.com/Nico6719
 // @include         *
@@ -949,6 +949,19 @@ static bool ShouldAnimate(HWND hwnd, const AnimParams& p, const wchar_t* cls,
                           const char** reason) {
     if (!IsWindow(hwnd)) {
         *reason = "not a window";
+        return false;
+    }
+
+    // The system's own switch for animations (Settings > Accessibility > Visual effects >
+    // Animation effects). Whoever turned it off did so because motion is a problem for
+    // them, and this mod is the largest single piece of motion on the screen, so it obeys
+    // that switch too. Read per show rather than once at init: it can be flipped at any
+    // moment and is expected to apply at once. One SystemParametersInfo call, and only for
+    // a window that is actually about to be shown - not per frame.
+    BOOL sysAnimations = TRUE;
+    if (SystemParametersInfoW(SPI_GETCLIENTAREAANIMATION, 0, &sysAnimations, 0) &&
+        !sysAnimations) {
+        *reason = "the system's animation effects are switched off";
         return false;
     }
 
@@ -3809,6 +3822,16 @@ static void CacheSelfPaths() {
 
 BOOL Wh_ModInit() {
     CacheSelfPaths();
+
+    // A remote session pays for this animation twice: every frame is a bitmap pushed down
+    // the wire, and the frames land on a connection that is already the bottleneck. Not
+    // loading is the only answer that costs nothing - no hooks, no IPC window, no work in
+    // any of the processes Windhawk injects into.
+    if (GetSystemMetrics(SM_REMOTESESSION)) {
+        Wh_Log(L"INIT [%s] v%s: remote session, not loading", g_thisExeName.c_str(),
+               WH_MOD_VERSION);
+        return FALSE;
+    }
 
     g_isShell = (g_thisExeName == L"explorer.exe");
     ClickShareInit();
