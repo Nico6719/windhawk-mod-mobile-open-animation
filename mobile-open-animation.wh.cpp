@@ -400,6 +400,10 @@ static std::vector<std::wstring> g_excludeClasses;
 static std::wstring g_thisExeName;
 static std::wstring g_thisExePath;
 static bool g_isShell = false;  // whether this process is explorer.exe (the shell)
+// Whether this process has package identity (Store/UWP/WinUI3-packaged app).
+// Sampled once at init (see CachePackageIdentity); the window decision below
+// only reads this cached bit, so there is no per-show cost.
+static bool g_isPackaged = false;
 
 // Cross-process sharing: "where the user just clicked".
 //
@@ -872,6 +876,7 @@ static const wchar_t* const kExcludedClasses[] = {
     L"XamlExplorerHostIslandWindow",
     L"Windows.UI.Input.InputSite.WindowClass",
     L"Windows.UI.Composition.DesktopWindowContentBridge",
+    L"WinUIDesktopWin32WindowClass",      // WinUI3 / WinAppSDK desktop
     L"MsoSplash",                           // Office splash screen
     L"Shell_TrayWnd", L"Shell_SecondaryTrayWnd",
     L"NotifyIconOverflowWindow",
@@ -924,6 +929,18 @@ static const char* IsExcludedClass(const wchar_t* cls) {
     }
     ReleaseSRWLockShared(&g_lock);
     return found ? "window class is in excludeClasses" : nullptr;
+}
+
+// Packaged (Store/UWP/WinUI) processes animate themselves, so their XAML
+// windows are skipped: class names change with every XAML generation
+// (CoreWindow -> ... -> WinUIDesktopWin32WindowClass), and exact matching
+// alone never stays complete. The process bit is sampled once at init; here
+// only the window family is matched, by prefix, so the next rename stays
+// covered. Unpackaged WinUI builds fall back to the exact list above.
+static bool IsPackagedWinUIFamily(const wchar_t* cls) {
+    if (!g_isPackaged) return false;
+    return wcsncmp(cls, L"Windows.UI.", 11) == 0 ||
+           wcsncmp(cls, L"Microsoft.UI.", 13) == 0;
 }
 
 // Whether the window nearly covers its monitor.
@@ -1069,6 +1086,10 @@ static bool ShouldAnimate(HWND hwnd, const AnimParams& p, const wchar_t* cls,
     }
     if (const char* r = IsExcludedClass(cls)) {
         *reason = r;
+        return false;
+    }
+    if (IsPackagedWinUIFamily(cls)) {
+        *reason = "packaged WinUI/XAML window (animates itself)";
         return false;
     }
 
@@ -3820,8 +3841,29 @@ static void CacheSelfPaths() {
     ToLowerInPlace(g_thisExeName);
 }
 
+// Whether this process carries package identity. Loaded dynamically so no new
+// import library is needed (AppModel.h is not required and the
+// @compilerOptions line stays untouched). Runs once at init; every window
+// decision afterwards reads only the cached g_isPackaged bit.
+static void CachePackageIdentity() {
+    g_isPackaged = false;
+    HMODULE k32 = GetModuleHandleW(L"kernel32.dll");
+    if (!k32) return;
+    using GetCurrentPackageFullName_t = LONG(WINAPI*)(UINT32*, PWSTR);
+    auto fn = (GetCurrentPackageFullName_t)GetProcAddress(k32, "GetCurrentPackageFullName");
+    if (!fn) return;  // pre-Win8: packages do not exist
+    UINT32 len = 0;
+    // ERROR_INSUFFICIENT_BUFFER (122) = packaged, len receives the size;
+    // APPMODEL_ERROR_NO_PACKAGE (15700) = ordinary unpackaged Win32.
+    g_isPackaged = (fn(&len, nullptr) == ERROR_INSUFFICIENT_BUFFER);
+    if (g_isPackaged) {
+        Wh_Log(L"  packaged process (Store/UWP/WinUI), WinUI windows will be skipped");
+    }
+}
+
 BOOL Wh_ModInit() {
     CacheSelfPaths();
+    CachePackageIdentity();
 
     // A remote session pays for this animation twice: every frame is a bitmap pushed down
     // the wire, and the frames land on a connection that is already the bottleneck. Not
